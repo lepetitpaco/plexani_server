@@ -42,6 +42,7 @@ _ws_clients: set[WebSocket] = set()
 
 
 async def _broadcast(data: dict) -> None:
+    """Diffuse un message JSON a tous les WebSockets encore valides."""
     dead: set[WebSocket] = set()
     for ws in list(_ws_clients):
         try:
@@ -61,6 +62,7 @@ async def _status_push_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    """Initialise les taches de fond et le suivi automatique au demarrage."""
     asyncio.create_task(_status_push_loop())
 
     cfg = load_config()
@@ -70,6 +72,7 @@ async def startup() -> None:
 
 
 def _has_required_tokens(cfg: Dict[str, Any]) -> bool:
+    """Verifie que la configuration minimale Plex + AniList est presente."""
     return bool(
         str(cfg.get("plex_token", "")).strip()
         and str(cfg.get("anilist_token", "")).strip()
@@ -82,6 +85,7 @@ def _has_required_tokens(cfg: Dict[str, Any]) -> bool:
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
+    """Maintient le canal temps reel du dashboard."""
     await ws.accept()
     _ws_clients.add(ws)
     try:
@@ -105,6 +109,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
 
 @app.get("/api/status")
 async def get_status() -> Dict[str, Any]:
+    """Retourne le statut courant du monitor enrichi par l'etat de config."""
     cfg = load_config()
     status = monitor.get_status()
     status["config_ok"] = _has_required_tokens(cfg)
@@ -113,6 +118,7 @@ async def get_status() -> Dict[str, Any]:
 
 @app.post("/api/monitoring/start")
 async def start_monitoring() -> Dict[str, Any]:
+    """Demarre la surveillance Plex si la configuration est complete."""
     cfg = load_config()
     if not _has_required_tokens(cfg):
         raise HTTPException(400, "Tokens manquants — configure Plex et AniList d'abord.")
@@ -125,6 +131,7 @@ async def start_monitoring() -> Dict[str, Any]:
 
 @app.post("/api/monitoring/sync")
 async def force_sync() -> Dict[str, Any]:
+    """Force la synchronisation AniList de l'episode Plex courant."""
     cfg = load_config()
     token = str(cfg.get("anilist_token", "")).strip()
     if not token:
@@ -142,6 +149,7 @@ async def force_sync() -> Dict[str, Any]:
 
 @app.post("/api/monitoring/stop")
 async def stop_monitoring() -> Dict[str, Any]:
+    """Arrete la surveillance Plex et notifie le dashboard."""
     monitor.stop()
     await _broadcast({"type": "status", "data": monitor.get_status()})
     return {"ok": True, "message": "Suivi arrêté."}
@@ -151,6 +159,7 @@ async def stop_monitoring() -> Dict[str, Any]:
 
 @app.get("/api/config")
 async def get_config() -> Dict[str, Any]:
+    """Expose la configuration sans renvoyer les tokens secrets."""
     cfg = load_config()
     # On masque les tokens dans la réponse (indique juste si présent)
     safe = {k: v for k, v in cfg.items() if k not in ("plex_token", "anilist_token")}
@@ -161,6 +170,7 @@ async def get_config() -> Dict[str, Any]:
 
 @app.post("/api/config")
 async def update_config(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Met a jour les champs de configuration autorises."""
     cfg = load_config()
     allowed = {
         "plex_server_name", "plex_username",
@@ -185,11 +195,13 @@ async def update_config(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/history")
 async def get_history() -> Dict[str, Any]:
+    """Retourne l'historique des actions de sync."""
     return monitor.get_history()
 
 
 @app.post("/api/history/rollback")
 async def rollback_last() -> Dict[str, Any]:
+    """Annule la derniere sync correspondant a la lecture courante."""
     cfg = load_config()
     token = str(cfg.get("anilist_token", "")).strip()
     if not token:
@@ -208,11 +220,13 @@ async def rollback_last() -> Dict[str, Any]:
 
 @app.get("/api/logs")
 async def get_logs(since: int = 0) -> Dict[str, Any]:
+    """Retourne les logs du monitor depuis un index donne."""
     return {"logs": monitor.get_logs(since_index=since)}
 
 
 @app.post("/api/logs/clear")
 async def clear_logs() -> Dict[str, Any]:
+    """Vide les logs en memoire et previent les clients connectes."""
     monitor.clear_logs()
     await _broadcast({"type": "logs", "data": []})
     return {"ok": True}
@@ -222,6 +236,7 @@ async def clear_logs() -> Dict[str, Any]:
 
 @app.post("/api/oauth/plex/init")
 async def plex_oauth_init() -> Dict[str, Any]:
+    """Demarre le flux OAuth PIN de Plex et renvoie l'URL d'autorisation."""
     global _plex_pin_login
     try:
         from plexapi.myplex import MyPlexPinLogin
@@ -234,6 +249,7 @@ async def plex_oauth_init() -> Dict[str, Any]:
 
 @app.get("/api/oauth/plex/poll")
 async def plex_oauth_poll() -> Dict[str, Any]:
+    """Interroge le flux OAuth Plex en attente et sauvegarde le token si pret."""
     global _plex_pin_login
     if _plex_pin_login is None:
         return {"done": False, "error": "Aucun flux OAuth Plex en cours."}
@@ -259,6 +275,7 @@ async def plex_oauth_poll() -> Dict[str, Any]:
 
 @app.get("/api/oauth/anilist/url")
 async def anilist_oauth_url() -> Dict[str, Any]:
+    """Construit l'URL d'autorisation OAuth AniList."""
     cfg = load_config()
     client_id = str(cfg.get("anilist_client_id", "")).strip()
     redirect_uri = str(cfg.get("anilist_redirect_uri", "http://localhost:8765/api/oauth/anilist/callback")).strip()
@@ -275,6 +292,7 @@ async def anilist_oauth_url() -> Dict[str, Any]:
 
 @app.get("/api/oauth/anilist/callback")
 async def anilist_oauth_callback(code: Optional[str] = None, error: Optional[str] = None) -> HTMLResponse:
+    """Echange le code OAuth AniList contre un token et affiche le resultat."""
     if error or not code:
         return HTMLResponse(
             "<html><body><p style='color:red'>Erreur OAuth AniList. Ferme et réessaie.</p></body></html>"
@@ -328,6 +346,7 @@ async def anilist_oauth_callback(code: Optional[str] = None, error: Optional[str
 
 @app.post("/api/mapping/set")
 async def mapping_set(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Enregistre un mapping manuel Plex vers AniList pour le serveur courant."""
     mapping_key = str(body.get("mapping_key", "")).strip()
     media_id = body.get("media_id")
     if not mapping_key or media_id is None:
@@ -347,6 +366,7 @@ async def mapping_set(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.delete("/api/mapping/remove")
 async def mapping_remove(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Supprime un mapping manuel du serveur courant."""
     mapping_key = str(body.get("mapping_key", "")).strip()
     if not mapping_key:
         raise HTTPException(400, "mapping_key est requis.")
@@ -363,6 +383,7 @@ async def mapping_remove(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/api/mapping/search")
 async def mapping_search(q: str = "") -> Dict[str, Any]:
+    """Recherche des candidats AniList pour aider le mapping manuel."""
     if not q.strip():
         return {"candidates": []}
     cfg = load_config()
@@ -388,10 +409,12 @@ async def mapping_search(q: str = "") -> Dict[str, Any]:
 
 # ── Image proxy (AniList CDN) ─────────────────────────────────────────────────
 
+# Hote AniList acceptes par le proxy pour eviter un proxy ouvert.
 _ALLOWED_IMAGE_HOSTS = {"s4.anilist.co", "s1.anilist.co", "img.anilist.co", "cdn.anilist.co"}
 
 @app.get("/api/proxy/image")
 async def proxy_image(url: str) -> Response:
+    """Proxyfie une image AniList en limitant les hotes CDN autorises."""
     from urllib.parse import urlparse
     parsed = urlparse(url)
     if parsed.hostname not in _ALLOWED_IMAGE_HOSTS:
@@ -411,6 +434,7 @@ async def proxy_image(url: str) -> Response:
 
 @app.get("/api/anilist/viewer")
 async def get_anilist_viewer() -> Dict[str, Any]:
+    """Retourne le profil Viewer AniList associe au token configure."""
     cfg = load_config()
     token = str(cfg.get("anilist_token", "")).strip()
     if not token:
@@ -429,6 +453,7 @@ async def get_anilist_viewer() -> Dict[str, Any]:
 
 @app.get("/api/plex/servers")
 async def get_plex_servers() -> Dict[str, Any]:
+    """Liste les serveurs Plex accessibles avec le token configure."""
     cfg = load_config()
     token = str(cfg.get("plex_token", "")).strip()
     if not token:
@@ -444,6 +469,7 @@ async def get_plex_servers() -> Dict[str, Any]:
 
 # ── Frontend static (servi en dernier) ───────────────────────────────────────
 
+# Build Vite servi par FastAPI quand il existe dans l'image de production.
 _STATIC_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 if _STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(_STATIC_DIR / "assets")), name="assets")
@@ -451,6 +477,7 @@ if _STATIC_DIR.exists():
     # Sert index.html pour toutes les routes non-API (SPA routing)
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str) -> Any:
+        """Sert l'application React pour les routes non API."""
         index = _STATIC_DIR / "index.html"
         if index.exists():
             return HTMLResponse(index.read_text("utf-8"))

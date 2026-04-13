@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { LogEntry } from "../App";
 
+/** Formate l'heure d'un log en heure locale francaise. */
 function fmtTime(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString("fr-FR", {
@@ -9,6 +10,7 @@ function fmtTime(iso: string): string {
   } catch { return iso; }
 }
 
+/** Journal temps reel du backend avec option de logs AniList verbose. */
 export default function Logs({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const [verbose, setVerbose] = useState(false);
@@ -21,6 +23,7 @@ export default function Logs({ logs, onClear }: { logs: LogEntry[]; onClear: () 
   }, []);
 
   useEffect(() => {
+    // Auto-scroll en bas pour suivre les nouveaux logs sans action utilisateur.
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs.length]);
 

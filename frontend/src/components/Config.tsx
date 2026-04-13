@@ -15,6 +15,7 @@ interface ConfigData {
   has_anilist_token: boolean;
 }
 
+/** Champ de formulaire avec aide optionnelle. */
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: "1.1rem" }}>
@@ -36,6 +37,7 @@ const inputStyle: React.CSSProperties = {
   outline: "none",
 };
 
+/** Section logique du formulaire de configuration. */
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: "1.5rem" }}>
@@ -52,6 +54,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+/** Ecran de configuration Plex, AniList et comportement de synchronisation. */
 export default function Config({ onSaved }: { onSaved: () => void }) {
   const [cfg, setCfg] = useState<ConfigData | null>(null);
   const [saving, setSaving] = useState(false);
@@ -65,6 +68,7 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
   const [plexServers, setPlexServers] = useState<string[]>([]);
   const [loadingServers, setLoadingServers] = useState(false);
 
+  /** Recharge la configuration exposee par le backend. */
   const loadConfig = async () => {
     try {
       const r = await fetch("/api/config");
@@ -72,6 +76,7 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
     } catch {}
   };
 
+  /** Recupere les serveurs Plex disponibles apres connexion OAuth. */
   const fetchServers = async () => {
     setLoadingServers(true);
     try {
@@ -94,6 +99,7 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
   // Poll Plex OAuth quand en attente
   useEffect(() => {
     if (!plexPolling) return;
+    // Le flux PIN Plex se termine hors de l'app; on sonde jusqu'a obtention du token.
     const id = setInterval(async () => {
       try {
         const r = await fetch("/api/oauth/plex/poll");

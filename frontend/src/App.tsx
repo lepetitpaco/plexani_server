@@ -6,6 +6,7 @@ import Logs from "./components/Logs";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface Session {
+  /** Cle Plex de lecture, utile pour distinguer deux lectures du meme episode. */
   session_key?: string | null;
   plex_title: string;
   plex_ep_title: string;
@@ -26,7 +27,9 @@ export interface Session {
   anilist_format: string | null;
   threshold: number;
   threshold_reached: boolean;
+  /** Cle stable utilisee pour le mapping manuel Plex -> AniList. */
   mapping_key: string | null;
+  /** Indique si la correspondance provient d'un mapping manuel. */
   has_manual_mapping: boolean;
 }
 
@@ -38,8 +41,10 @@ export interface Status {
   log_count: number;
 }
 
+/** Entree de journal horodatee envoyee par le backend. */
 export interface LogEntry { at: string; msg: string; }
 
+/** Action historisee par le backend apres sync ou rollback. */
 export interface HistoryAction {
   at: string;
   type: string;
@@ -58,6 +63,7 @@ export interface HistoryAction {
 
 type Tab = "dashboard" | "config" | "logs";
 
+/** Racine React: orchestre les onglets, le WebSocket et les donnees partagees. */
 export default function App() {
   const [tab, setTab] = useState<Tab>("dashboard");
   const [status, setStatus] = useState<Status | null>(null);
@@ -89,6 +95,7 @@ export default function App() {
   }, []);
 
   const connect = useCallback(() => {
+    // Le WebSocket pousse le statut; les messages ponctuels declenchent des rechargements cibles.
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
     wsRef.current = ws;
@@ -107,6 +114,7 @@ export default function App() {
 
     ws.onclose = () => {
       setWsConnected(false);
+      // Reconnexion simple cote client pour survivre aux redemarrages du backend.
       reconnectTimer.current = setTimeout(connect, 3000);
     };
 

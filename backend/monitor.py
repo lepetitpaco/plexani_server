@@ -21,19 +21,33 @@ HISTORY_PATH = DATA_DIR / "history.json"
 CONFIG_PATH = DATA_DIR / "config.json"
 
 CONFIG_DEFAULTS: Dict[str, Any] = {
+    # Token OAuth Plex stocke cote serveur.
     "plex_token": "",
+    # Nom du serveur Plex a surveiller.
     "plex_server_name": "",
+    # Utilisateur Plex dont les sessions doivent etre suivies.
     "plex_username": "",
+    # Token OAuth AniList stocke cote serveur.
     "anilist_token": "",
+    # Identifiant de l'application OAuth AniList.
     "anilist_client_id": "",
+    # Secret de l'application OAuth AniList.
     "anilist_client_secret": "",
+    # URL locale appelee par AniList apres l'autorisation.
     "anilist_redirect_uri": "http://localhost:8765/api/oauth/anilist/callback",
+    # Delai entre deux lectures de sessions Plex.
     "poll_interval_seconds": 10,
+    # Pourcentage de visionnage requis avant sync automatique.
     "sync_threshold_percent": 85.0,
+    # Force un seuil proche de la fin d'episode.
     "sync_end_only": False,
+    # Mode "video" pour auto-sync, "manual" pour action utilisateur seule.
     "anime_auto_tracking_mode": "video",
+    # Lance le monitor au demarrage si la config est complete.
     "autostart_monitoring": True,
+    # Active les logs GraphQL AniList detaillees.
     "verbose_anilist": False,
+    # Mappings Plex -> AniList ranges par serveur Plex.
     "manual_mappings": {},
 }
 
@@ -43,6 +57,7 @@ SYNC_END_ONLY_MIN_PERCENT = 97.0
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def load_config() -> Dict[str, Any]:
+    """Charge la configuration persistante en appliquant les valeurs par defaut."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     merged = dict(CONFIG_DEFAULTS)
     if CONFIG_PATH.exists():
@@ -54,11 +69,13 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
+    """Persiste la configuration serveur au format JSON."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
 
 
 def effective_threshold(cfg: Dict[str, Any]) -> float:
+    """Calcule le seuil de sync effectif apres bornage et option fin d'episode."""
     try:
         raw = max(1.0, min(100.0, float(cfg.get("sync_threshold_percent", 85.0))))
     except (TypeError, ValueError):
@@ -71,6 +88,7 @@ def effective_threshold(cfg: Dict[str, Any]) -> float:
 # ── History ───────────────────────────────────────────────────────────────────
 
 def load_history() -> Dict[str, Any]:
+    """Charge l'historique des syncs et des episodes traites."""
     if HISTORY_PATH.exists():
         try:
             return json.loads(HISTORY_PATH.read_text("utf-8"))
@@ -80,11 +98,13 @@ def load_history() -> Dict[str, Any]:
 
 
 def save_history(history: Dict[str, Any]) -> None:
+    """Persiste l'historique des actions de synchronisation."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_PATH.write_text(json.dumps(history, ensure_ascii=False, indent=2), "utf-8")
 
 
 def utc_now_iso() -> str:
+    """Retourne l'horodatage courant en ISO UTC."""
     return datetime.now(tz=timezone.utc).isoformat()
 
 
@@ -97,6 +117,7 @@ class Monitor:
     """
 
     def __init__(self) -> None:
+        """Initialise l'etat partage et les caches du monitor."""
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -117,6 +138,7 @@ class Monitor:
     # ── Logging ───────────────────────────────────────────────────────────────
 
     def log(self, msg: str) -> None:
+        """Ajoute une entree de log horodatee et limite le tampon en memoire."""
         entry = {"at": utc_now_iso(), "msg": msg}
         with self._lock:
             self.logs.append(entry)
@@ -125,16 +147,19 @@ class Monitor:
         print(f"[plexani] {msg}")
 
     def get_logs(self, since_index: int = 0) -> List[Dict[str, str]]:
+        """Retourne les logs a partir d'un index connu du client."""
         with self._lock:
             return list(self.logs[since_index:])
 
     def clear_logs(self) -> None:
+        """Vide le tampon de logs expose par l'API."""
         with self._lock:
             self.logs = []
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
 
     def start(self) -> bool:
+        """Demarre le thread de surveillance si aucun thread actif n'existe."""
         if self._thread and self._thread.is_alive():
             return False
         self._stop_event.clear()
@@ -146,17 +171,20 @@ class Monitor:
         return True
 
     def stop(self) -> None:
+        """Demande l'arret du monitor et efface la session courante."""
         self._stop_event.set()
         with self._lock:
             self.monitoring = False
             self.current_session = None
 
     def is_running(self) -> bool:
+        """Indique si le thread de surveillance est encore vivant."""
         return bool(self._thread and self._thread.is_alive())
 
     # ── Status snapshot ───────────────────────────────────────────────────────
 
     def get_status(self) -> Dict[str, Any]:
+        """Construit un instantane de statut consommable par le dashboard."""
         with self._lock:
             return {
                 "monitoring": self.monitoring and self.is_running(),
@@ -168,12 +196,14 @@ class Monitor:
     # ── History helpers ───────────────────────────────────────────────────────
 
     def get_history(self) -> Dict[str, Any]:
+        """Retourne les actions historiques exposees a l'interface."""
         with self._lock:
             return {
                 "actions": list(self.history.get("actions", [])),
             }
 
     def clear_resolve_cache_key(self, key: str) -> None:
+        """Invalide une entree de cache de resolution AniList."""
         self._resolve_cache.pop(key, None)
 
     def _migrate_mapping_keys(self, cfg: Dict[str, Any]) -> None:
@@ -186,6 +216,7 @@ class Monitor:
 
     @staticmethod
     def _build_mapping_key(session: Any, season_number: int) -> str:
+        """Construit la cle stable de mapping manuel pour une serie/saison Plex."""
         grk = getattr(session, "grandparentRatingKey", None)
         if grk:
             return f"plex:{grk}:s{season_number}"
@@ -253,6 +284,7 @@ class Monitor:
 
     @staticmethod
     def _processed_keys_for_action(action: Dict[str, Any]) -> List[str]:
+        """Reconstruit les cles d'episode marquees comme traitees par une action."""
         keys: List[str] = []
         for raw in (action.get("episode_key"), action.get("plex_rating_key")):
             if raw is not None and str(raw).strip():
@@ -299,6 +331,7 @@ class Monitor:
         self.log(f"Sync manuelle : {session.get('anilist_title')} ep.{to_p} (avant : {prev_progress})")
 
         episode_key = session.get("episode_key") or f"{session.get('plex_title')}:{episode}"
+        # L'action forcee suit le meme format que la sync auto pour l'historique.
         action = {
             "at": utc_now_iso(),
             "type": "update",
@@ -406,6 +439,7 @@ class Monitor:
         self._migrate_mapping_keys(cfg)
 
         target_cf = plex_username.strip().casefold()
+        # Plex expose parfois seulement la partie locale d'une adresse mail.
         target_local = target_cf.split("@", 1)[0] if "@" in target_cf else target_cf
         return plex_server, anilist_client, target_cf, target_local
 
@@ -413,6 +447,7 @@ class Monitor:
 
     @staticmethod
     def _session_viewer_ids(session: Any) -> List[str]:
+        """Extrait les identifiants utilisateur disponibles sur une session Plex."""
         out: List[str] = []
         raw_list = getattr(session, "usernames", None)
         if isinstance(raw_list, (list, tuple)):
@@ -427,6 +462,7 @@ class Monitor:
         return [x.strip() for x in out if x.strip() and not seen.add(x.strip().casefold())]  # type: ignore[func-returns-value]
 
     def _viewer_matches(self, session: Any, target_cf: str, target_local: str) -> bool:
+        """Verifie si une session Plex appartient a l'utilisateur cible."""
         for ident in self._session_viewer_ids(session):
             icf = ident.casefold()
             if icf == target_cf:
@@ -437,12 +473,14 @@ class Monitor:
         return False
 
     def _find_user_session(self, sessions: List[Any], target_cf: str, target_local: str) -> Optional[Any]:
+        """Retourne la premiere session Plex correspondant a l'utilisateur cible."""
         for s in sessions:
             if self._viewer_matches(s, target_cf, target_local):
                 return s
         return None
 
     def _maybe_log_session_help(self, sessions: List[Any], username: str) -> None:
+        """Emet un diagnostic periodique quand aucune session cible n'est trouvee."""
         now = time.monotonic()
         if now - self._plex_diag_last < 60.0:
             return
@@ -462,6 +500,7 @@ class Monitor:
 
     @staticmethod
     def _episode_key(session: Any) -> str:
+        """Construit une cle d'episode stable pour eviter les doubles syncs."""
         rating_key = getattr(session, "ratingKey", None)
         grandparent = getattr(session, "grandparentTitle", "Unknown")
         episode_idx = getattr(session, "index", 0)
@@ -469,6 +508,7 @@ class Monitor:
 
     @staticmethod
     def _is_playing(session: Any) -> bool:
+        """Retourne False si tous les players connus indiquent une pause."""
         players = getattr(session, "players", None) or []
         if not players:
             return True
@@ -484,6 +524,7 @@ class Monitor:
         auto_mode: str,
         cfg: Dict[str, Any],
     ) -> None:
+        """Traite une session Plex detectee et synchronise AniList si les seuils passent."""
         title = getattr(session, "grandparentTitle", "Unknown")
         ep_num = int(getattr(session, "index", 0) or 0)
         season = getattr(session, "parentIndex", None)
@@ -536,6 +577,7 @@ class Monitor:
         elif mapping_key in self._resolve_cache and now - self._resolve_cache[mapping_key][2] < 300.0:
             media_id, matched_title, _ = self._resolve_cache[mapping_key]
         else:
+            # Resolution automatique: recherche AniList puis cache court pour limiter l'API.
             best = anilist_client.find_best_anime_id(title, season_number=season_number)
             if best:
                 media_id, matched_title = best
@@ -607,7 +649,7 @@ class Monitor:
         if auto_mode == "manual":
             return
 
-        # Gate : seuil + non en pause
+        # Garde-fou : la sync auto attend le seuil et une lecture non pausee.
         if pct < threshold or not self._is_playing(session):
             return
 

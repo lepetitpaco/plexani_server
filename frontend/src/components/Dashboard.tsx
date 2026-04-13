@@ -31,6 +31,7 @@ const FORMAT_FR: Record<string, string> = {
   MUSIC:      "Musique",
 };
 
+/** Formate une duree Plex en millisecondes pour l'affichage. */
 function fmtMs(ms: number): string {
   const s = Math.floor(ms / 1000);
   const h = Math.floor(s / 3600);
@@ -40,6 +41,7 @@ function fmtMs(ms: number): string {
   return `${m}:${String(sec).padStart(2, "0")}`;
 }
 
+/** Produit un libelle court du temps restant avant le seuil de sync. */
 function fmtRemaining(ms: number): string {
   const m = Math.floor(ms / 60000);
   if (m <= 0) return "bientôt";
@@ -47,6 +49,7 @@ function fmtRemaining(ms: number): string {
   return `encore ${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}`;
 }
 
+/** Formate un horodatage ISO en relatif lisible pour l'historique inline. */
 function fmtRelative(iso: string): string {
   try {
     const diff = Date.now() - new Date(iso).getTime();
@@ -61,6 +64,7 @@ function fmtRelative(iso: string): string {
 
 // ── Section label ─────────────────────────────────────────────────────────────
 
+/** Libelle visuel reutilise pour separer les blocs du dashboard. */
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -74,6 +78,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 // ── Card shell ────────────────────────────────────────────────────────────────
 
+/** Conteneur visuel commun aux panneaux du dashboard. */
 function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
   return (
     <div style={{
@@ -90,12 +95,14 @@ function Card({ children, style }: { children: React.ReactNode; style?: React.CS
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
+/** Profil AniList affiche dans l'en-tete du dashboard. */
 export interface ViewerProfile {
   name: string;
   avatar_url: string;
   id: number;
 }
 
+/** Vue principale de suivi: lecture Plex, correspondance AniList et actions rapides. */
 export default function Dashboard({
   status,
   history,
@@ -103,7 +110,9 @@ export default function Dashboard({
   viewer,
 }: {
   status: Status | null;
+  /** Historique trie cote parent, utilise pour le rollback contextuel. */
   history: HistoryAction[];
+  /** Recharge l'historique apres une sync forcee ou un rollback. */
   onHistoryRefresh: () => void;
   viewer: ViewerProfile | null;
 }) {
@@ -118,6 +127,7 @@ export default function Dashboard({
 
   useEffect(() => {
     if (!searchQuery.trim()) { setSearchResults([]); return; }
+    // Debounce local pour eviter une requete AniList a chaque frappe.
     const t = setTimeout(async () => {
       try {
         const r = await fetch(`/api/mapping/search?q=${encodeURIComponent(searchQuery)}`);
@@ -205,14 +215,14 @@ export default function Dashboard({
   
   let canRollback = false;
   if (s?.anilist_media_id && s?.episode != null && s.session_key != null) {
-      // Find the last update action
+      // Le rollback n'est active que pour la meme lecture physique encore courante.
       const lastUpdate = history.find(a => a.type === "update");
       if (lastUpdate && lastUpdate.media_id === s.anilist_media_id && lastUpdate.episode === s.episode && lastUpdate.session_key === s.session_key) {
           canRollback = true;
       }
   }
 
-  // Filter history to ONLY show actions for the currently playing episode
+  // Filtre l'historique sur l'episode courant pour eviter un rollback hors contexte.
   const recentHistory = history
     .filter((a) => s && a.media_id === s.anilist_media_id && a.episode === s.episode)
     .slice(0, 5);

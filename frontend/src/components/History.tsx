@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import type { HistoryAction } from "../App";
 
+/** Formate un horodatage ISO pour la liste d'historique complete. */
 function fmtDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString("fr-FR", {
@@ -10,12 +11,14 @@ function fmtDate(iso: string): string {
   } catch { return iso; }
 }
 
+/** Affiche l'historique global des synchronisations et rollbacks. */
 export default function History() {
   const [actions, setActions] = useState<HistoryAction[]>([]);
   const [loading, setLoading] = useState(true);
   const [rolling, setRolling] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
+  /** Recharge les actions historisees depuis le backend. */
   const load = async () => {
     setLoading(true);
     try {

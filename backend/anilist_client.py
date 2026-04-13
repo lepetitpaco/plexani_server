@@ -16,10 +16,12 @@ ANILIST_GRAPHQL_URL = "https://graphql.anilist.co"
 
 
 class AniListClientError(Exception):
-    """Raised when AniList API operations fail."""
+    """Erreur levee quand une operation AniList echoue."""
 
 
 class AniListClient:
+    """Encapsule les appels GraphQL AniList utilises par la synchronisation Plex."""
+
     def __init__(
         self,
         token: str,
@@ -28,6 +30,18 @@ class AniListClient:
         verbose: bool = False,
         logger: Optional[Any] = None,
     ) -> None:
+        """Prepare une session HTTP authentifiee pour AniList.
+
+        Args:
+            token: Token OAuth AniList a envoyer en Bearer.
+            timeout: Delai maximum des appels HTTP, en secondes.
+            viewer_id: Identifiant AniList deja connu pour les requetes MediaList.
+            verbose: Active les traces GraphQL detaillees.
+            logger: Callable optionnel recevant les messages verbose.
+
+        Raises:
+            ValueError: Si aucun token AniList n'est fourni.
+        """
         if not token:
             raise ValueError("AniList token is required.")
         self.token = token
@@ -43,6 +57,7 @@ class AniListClient:
         })
 
     def _vlog(self, label: str, data: Any = None) -> None:
+        """Emet un log verbose AniList si le mode verbose est actif."""
         if not self.verbose:
             return
         if data is None:
@@ -66,6 +81,12 @@ class AniListClient:
 
         Lors d'un passage de « Plan to Watch » / « Pause » -> « Watching », le statut
         est promu automatiquement vers CURRENT sans popup.
+        Args:
+            list_entry: Entree AniList actuelle, ou None si l'anime est absent.
+            new_progress: Progression cible, conservee pour de futures regles.
+
+        Returns:
+            Statut AniList a envoyer avec la mutation de sauvegarde.
         """
         _ = new_progress  # reserve si regles plus fines (ex. dernier ep -> COMPLETED)
         if not list_entry:
@@ -78,6 +99,7 @@ class AniListClient:
         return "CURRENT"
 
     def _request(self, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute une requete GraphQL AniList et retourne le champ data."""
         self._vlog("─" * 60)
         self._vlog("GraphQL query:", query.strip())
         self._vlog("Variables", variables)
@@ -111,7 +133,14 @@ class AniListClient:
         return result
 
     def verify_token(self) -> str:
-        """Verifie que le token utilisateur est valide. Retourne le nom du Viewer AniList."""
+        """Verifie que le token utilisateur est valide.
+
+        Returns:
+            Nom du Viewer AniList associe au token.
+
+        Raises:
+            AniListClientError: Si le Viewer est absent de la reponse.
+        """
         query = "query { Viewer { name } }"
         data = self._request(query, {})
         viewer = data.get("Viewer")
@@ -120,7 +149,14 @@ class AniListClient:
         return str(viewer.get("name") or "")
 
     def get_viewer_profile(self) -> Dict[str, Any]:
-        """Profil Viewer : id, nom, URL avatar (grande)."""
+        """Recupere le profil du Viewer AniList.
+
+        Returns:
+            Dictionnaire contenant id, name et avatar_url.
+
+        Raises:
+            AniListClientError: Si le Viewer est absent de la reponse.
+        """
         query = """
         query {
           Viewer {
@@ -148,6 +184,11 @@ class AniListClient:
 
         Deux requêtes séparées : Media (toujours présent) et MediaList (peut
         être absent si l'anime n'est pas encore dans la liste → 404).
+        Args:
+            media_id: Identifiant AniList du media ANIME.
+
+        Returns:
+            Dictionnaire avec les cles media et list_entry.
         """
         media_query = """
         query ($id: Int!) {
@@ -172,7 +213,7 @@ class AniListClient:
 
     @staticmethod
     def _ordinal(n: int) -> str:
-        """Return English ordinal string for n (1→'1st', 2→'2nd', 3→'3rd', 4→'4th'…)."""
+        """Retourne l'ordinal anglais utilise dans les recherches de saisons."""
         if 11 <= (n % 100) <= 13:
             suffix = "th"
         else:
@@ -182,7 +223,14 @@ class AniListClient:
     @staticmethod
     def normalize_title(raw_title: str) -> str:
         """
-        Clean noisy release tags and punctuation for better matching.
+        Nettoie les tags de release et la ponctuation pour ameliorer le matching.
+
+        Args:
+            raw_title: Titre brut provenant de Plex ou d'un nom de release.
+
+        Returns:
+            Titre simplifie pret a comparer ou chercher.
+
         Example: "[SubsPlease] Frieren - 03 [1080p]" -> "Frieren"
         """
         if not raw_title:
@@ -199,6 +247,15 @@ class AniListClient:
         return title.strip()
 
     def search_anime_candidates(self, title: str, per_page: int = 5) -> List[Dict[str, Any]]:
+        """Recherche des candidats AniList pour un titre.
+
+        Args:
+            title: Titre Plex ou variante a chercher.
+            per_page: Nombre maximum de resultats AniList a demander.
+
+        Returns:
+            Liste brute des medias retournes par AniList.
+        """
         query = """
         query ($search: String, $perPage: Int) {
           Page(perPage: $perPage) {
@@ -229,8 +286,9 @@ class AniListClient:
         return results
 
     def _exact_match(self, candidates: List[Dict[str, Any]], cleaned: str) -> Optional[Tuple[int, str]]:
-        """Return (id, romaji) for the first candidate whose normalised titles match cleaned."""
+        """Retourne le premier candidat dont un titre normalise correspond exactement."""
         for item in candidates:
+            # Compare le titre principal, les variantes AniList et les synonymes.
             names = [
                 item.get("title", {}).get("romaji"),
                 item.get("title", {}).get("english"),
@@ -379,6 +437,19 @@ class AniListClient:
     def save_progress(
         self, media_id: int, progress: int, status: str = "CURRENT"
     ) -> Dict[str, Any]:
+        """Enregistre une progression AniList pour un media.
+
+        Args:
+            media_id: Identifiant AniList du media.
+            progress: Episode cible a enregistrer.
+            status: Statut MediaList a associer a la progression.
+
+        Returns:
+            Entree MediaList retournee par SaveMediaListEntry.
+
+        Raises:
+            AniListClientError: Si la mutation ne renvoie pas d'entree.
+        """
         mutation = """
         mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus) {
           SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status) {
@@ -434,11 +505,13 @@ class AniListClient:
         }
 
     def get_entry_progress(self, media_id: int) -> int:
+        """Retourne la progression courante d'un media, ou 0 si absent."""
         entry = self.get_media_list_entry(media_id)
         if not entry:
             return 0
         return int(entry.get("progress") or 0)
 
     def rollback_to_progress(self, media_id: int, progress: int) -> Dict[str, Any]:
-        # Rollback keeps status as CURRENT so user can resume naturally.
+        """Ramene une entree AniList a une progression precedente."""
+        # Le rollback conserve CURRENT pour permettre une reprise naturelle.
         return self.save_progress(media_id=media_id, progress=progress, status="CURRENT")
