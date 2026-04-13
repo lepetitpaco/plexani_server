@@ -1,0 +1,17 @@
+services:
+  plexani:
+    build: .
+    container_name: plexani-server
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    volumes:
+      - plexani-data:/data
+    environment:
+      - DATA_DIR=/data
+    # Optionnel : accès réseau local Plex (si Plex tourne sur le même hôte)
+    # network_mode: host
+
+volumes:
+  plexani-data:
+    name: plexani-data
