@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Status, HistoryAction } from "../App";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -110,6 +110,46 @@ export default function Dashboard({
   const [rolling, setRolling] = useState(false);
   const [rollMsg, setRollMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+
+  // Mapping manuel
+  const [mappingOpen, setMappingOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!searchQuery.trim()) { setSearchResults([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/mapping/search?q=${encodeURIComponent(searchQuery)}`);
+        const d = await r.json();
+        setSearchResults(d.candidates ?? []);
+      } catch {}
+    }, 400);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
+
+  const handleSetMapping = async (mediaId: number) => {
+    const s = status?.current_session;
+    if (!s?.mapping_key) return;
+    await fetch("/api/mapping/set", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mapping_key: s.mapping_key, media_id: mediaId }),
+    });
+    setMappingOpen(false);
+    setSearchQuery("");
+    setSearchResults([]);
+  };
+
+  const handleRemoveMapping = async () => {
+    const s = status?.current_session;
+    if (!s?.mapping_key) return;
+    await fetch("/api/mapping/remove", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mapping_key: s.mapping_key }),
+    });
+  };
 
   const handleForceSync = async () => {
     setSyncing(true);
@@ -397,6 +437,90 @@ export default function Dashboard({
           ) : (
             <div style={{ textAlign: "center", padding: "2rem 0", color: "var(--muted)", fontSize: 14 }}>
               —
+            </div>
+          )}
+
+          {/* ── Mapping manuel ── */}
+          {s && (
+            <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: mappingOpen ? "0.5rem" : 0 }}>
+                {s.has_manual_mapping && (
+                  <span style={{
+                    fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4,
+                    background: "var(--accent-dim)", color: "var(--accent)",
+                  }}>Manuel</span>
+                )}
+                <button
+                  onClick={() => { setMappingOpen(!mappingOpen); setSearchQuery(s.plex_title ?? ""); setSearchResults([]); }}
+                  style={{
+                    fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5,
+                    background: "var(--surface2)", color: "var(--muted)",
+                    border: "1px solid var(--border)", cursor: "pointer",
+                  }}
+                >
+                  {mappingOpen ? "Annuler" : "Corriger"}
+                </button>
+                {s.has_manual_mapping && !mappingOpen && (
+                  <button
+                    onClick={handleRemoveMapping}
+                    style={{
+                      fontSize: 11, fontWeight: 600, padding: "3px 8px", borderRadius: 5,
+                      background: "var(--red-dim)", color: "var(--red)",
+                      border: "1px solid var(--red)", cursor: "pointer",
+                    }}
+                  >
+                    Réinitialiser
+                  </button>
+                )}
+              </div>
+
+              {mappingOpen && (
+                <div>
+                  <input
+                    autoFocus
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Rechercher sur AniList…"
+                    style={{
+                      width: "100%", boxSizing: "border-box",
+                      background: "var(--surface2)", border: "1px solid var(--border)",
+                      borderRadius: 6, color: "var(--fg)", padding: "0.4rem 0.6rem",
+                      fontSize: 12, outline: "none", marginBottom: "0.4rem",
+                    }}
+                  />
+                  <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 220, overflowY: "auto" }}>
+                    {searchResults.map((r: any) => (
+                      <div
+                        key={r.id}
+                        onClick={() => handleSetMapping(r.id)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: 8,
+                          padding: "0.3rem 0.4rem", borderRadius: 5, cursor: "pointer",
+                          background: "var(--surface2)",
+                        }}
+                        onMouseEnter={(e) => (e.currentTarget.style.background = "var(--accent-dim)")}
+                        onMouseLeave={(e) => (e.currentTarget.style.background = "var(--surface2)")}
+                      >
+                        {r.coverImage?.medium
+                          ? <img src={`/api/proxy/image?url=${encodeURIComponent(r.coverImage.medium)}`}
+                              style={{ width: 28, height: 40, objectFit: "cover", borderRadius: 3, flexShrink: 0 }} />
+                          : <div style={{ width: 28, height: 40, background: "var(--border)", borderRadius: 3, flexShrink: 0 }} />
+                        }
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {r.title?.romaji ?? "—"}
+                          </div>
+                          {r.title?.english && (
+                            <div style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {r.title.english}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </Card>

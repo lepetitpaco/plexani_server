@@ -166,7 +166,7 @@ async def update_config(body: Dict[str, Any]) -> Dict[str, Any]:
         "plex_server_name", "plex_username",
         "anilist_client_id", "anilist_client_secret", "anilist_redirect_uri",
         "poll_interval_seconds", "sync_threshold_percent", "sync_end_only",
-        "anime_auto_tracking_mode", "autostart_monitoring",
+        "anime_auto_tracking_mode", "autostart_monitoring", "verbose_anilist",
     }
     for key in allowed:
         if key in body:
@@ -209,6 +209,13 @@ async def rollback_last() -> Dict[str, Any]:
 @app.get("/api/logs")
 async def get_logs(since: int = 0) -> Dict[str, Any]:
     return {"logs": monitor.get_logs(since_index=since)}
+
+
+@app.post("/api/logs/clear")
+async def clear_logs() -> Dict[str, Any]:
+    monitor.clear_logs()
+    await _broadcast({"type": "logs", "data": []})
+    return {"ok": True}
 
 
 # ── OAuth Plex ────────────────────────────────────────────────────────────────
@@ -317,6 +324,68 @@ async def anilist_oauth_callback(code: Optional[str] = None, error: Optional[str
         )
 
 
+# ── Mapping manuel Plex → AniList ────────────────────────────────────────────
+
+@app.post("/api/mapping/set")
+async def mapping_set(body: Dict[str, Any]) -> Dict[str, Any]:
+    mapping_key = str(body.get("mapping_key", "")).strip()
+    media_id = body.get("media_id")
+    if not mapping_key or media_id is None:
+        raise HTTPException(400, "mapping_key et media_id sont requis.")
+    cfg = load_config()
+    server_name = str(cfg.get("plex_server_name", "")).strip()
+    all_mappings = dict(cfg.get("manual_mappings") or {})
+    server_mappings = dict(all_mappings.get(server_name, {}))
+    server_mappings[mapping_key] = int(media_id)
+    all_mappings[server_name] = server_mappings
+    cfg["manual_mappings"] = all_mappings
+    save_config(cfg)
+    monitor.clear_resolve_cache_key(mapping_key)
+    monitor.log(f"Mapping manuel enregistré : {mapping_key} → {media_id}")
+    return {"ok": True}
+
+
+@app.delete("/api/mapping/remove")
+async def mapping_remove(body: Dict[str, Any]) -> Dict[str, Any]:
+    mapping_key = str(body.get("mapping_key", "")).strip()
+    if not mapping_key:
+        raise HTTPException(400, "mapping_key est requis.")
+    cfg = load_config()
+    server_name = str(cfg.get("plex_server_name", "")).strip()
+    all_mappings = dict(cfg.get("manual_mappings") or {})
+    all_mappings.get(server_name, {}).pop(mapping_key, None)
+    cfg["manual_mappings"] = all_mappings
+    save_config(cfg)
+    monitor.clear_resolve_cache_key(mapping_key)
+    monitor.log(f"Mapping manuel supprimé : {mapping_key}")
+    return {"ok": True}
+
+
+@app.get("/api/mapping/search")
+async def mapping_search(q: str = "") -> Dict[str, Any]:
+    if not q.strip():
+        return {"candidates": []}
+    cfg = load_config()
+    token = str(cfg.get("anilist_token", "")).strip()
+    if not token:
+        raise HTTPException(400, "Token AniList manquant.")
+    try:
+        from anilist_client import AniListClient
+        client = AniListClient(token=token)
+        candidates = client.search_anime_candidates(title=q, per_page=10)
+        results = [
+            {
+                "id": c.get("id"),
+                "title": c.get("title", {}),
+                "coverImage": c.get("coverImage", {}),
+            }
+            for c in candidates
+        ]
+        return {"candidates": results}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
 # ── Image proxy (AniList CDN) ─────────────────────────────────────────────────
 
 _ALLOWED_IMAGE_HOSTS = {"s4.anilist.co", "s1.anilist.co", "img.anilist.co", "cdn.anilist.co"}
@@ -348,7 +417,8 @@ async def get_anilist_viewer() -> Dict[str, Any]:
         return {"ok": False, "error": "Token AniList manquant."}
     try:
         from anilist_client import AniListClient
-        client = AniListClient(token=token)
+        verbose = bool(cfg.get("verbose_anilist", False))
+        client = AniListClient(token=token, verbose=verbose)
         profile = client.get_viewer_profile()
         return {"ok": True, **profile}
     except Exception as exc:

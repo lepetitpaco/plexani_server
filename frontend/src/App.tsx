@@ -26,6 +26,8 @@ export interface Session {
   anilist_format: string | null;
   threshold: number;
   threshold_reached: boolean;
+  mapping_key: string | null;
+  has_manual_mapping: boolean;
 }
 
 export interface Status {
@@ -271,7 +273,7 @@ export default function App() {
           />
         )}
         {tab === "config" && <Config onSaved={() => setTab("dashboard")} />}
-        {tab === "logs" && <Logs logs={logs} />}
+        {tab === "logs" && <Logs logs={logs} onClear={() => setLogs([])} />}
       </main>
     </div>
   );

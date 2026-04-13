@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LogEntry } from "../App";
 
 function fmtTime(iso: string): string {
@@ -9,12 +9,38 @@ function fmtTime(iso: string): string {
   } catch { return iso; }
 }
 
-export default function Logs({ logs }: { logs: LogEntry[] }) {
+export default function Logs({ logs, onClear }: { logs: LogEntry[]; onClear: () => void }) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const [verbose, setVerbose] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((d) => setVerbose(Boolean(d.verbose_anilist)))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs.length]);
+
+  const handleClear = async () => {
+    onClear();
+    try {
+      await fetch("/api/logs/clear", { method: "POST" });
+    } catch {}
+  };
+
+  const toggleVerbose = async (checked: boolean) => {
+    setVerbose(checked);
+    try {
+      await fetch("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ verbose_anilist: checked }),
+      });
+    } catch {}
+  };
 
   return (
     <div style={{
@@ -23,7 +49,27 @@ export default function Logs({ logs }: { logs: LogEntry[] }) {
     }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
         <h2 style={{ fontSize: 16, fontWeight: 700 }}>Journal</h2>
-        <span style={{ fontSize: 12, color: "var(--muted)" }}>{logs.length} entrées</span>
+        <div style={{ display: "flex", alignItems: "center", gap: "1.25rem" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: "var(--muted)" }}>
+            <input
+              type="checkbox"
+              checked={verbose}
+              onChange={(e) => toggleVerbose(e.target.checked)}
+            />
+            Logs verbose AniList
+          </label>
+          <button
+            onClick={handleClear}
+            style={{
+              fontSize: 11, fontWeight: 600, padding: "3px 9px", borderRadius: 5,
+              background: "var(--surface2)", color: "var(--muted)",
+              border: "1px solid var(--border)", cursor: "pointer",
+            }}
+          >
+            Vider
+          </button>
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>{logs.length} entrées</span>
+        </div>
       </div>
       <div style={{
         flex: 1, overflow: "auto",

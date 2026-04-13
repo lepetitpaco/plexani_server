@@ -33,6 +33,8 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     "sync_end_only": False,
     "anime_auto_tracking_mode": "video",
     "autostart_monitoring": True,
+    "verbose_anilist": False,
+    "manual_mappings": {},
 }
 
 SYNC_END_ONLY_MIN_PERCENT = 97.0
@@ -110,6 +112,7 @@ class Monitor:
         self._notified_episode_keys: set = set()
         self._map_fail_key: str = ""
         self._plex_diag_last: float = 0.0
+        self._resolve_cache: Dict[str, Tuple[int, str, float]] = {}
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -124,6 +127,10 @@ class Monitor:
     def get_logs(self, since_index: int = 0) -> List[Dict[str, str]]:
         with self._lock:
             return list(self.logs[since_index:])
+
+    def clear_logs(self) -> None:
+        with self._lock:
+            self.logs = []
 
     # ── Start / Stop ──────────────────────────────────────────────────────────
 
@@ -166,6 +173,25 @@ class Monitor:
                 "actions": list(self.history.get("actions", [])),
             }
 
+    def clear_resolve_cache_key(self, key: str) -> None:
+        self._resolve_cache.pop(key, None)
+
+    def _migrate_mapping_keys(self, cfg: Dict[str, Any]) -> None:
+        """Migre l'ancienne structure à plat vers la structure imbriquée par serveur."""
+        server_name = str(cfg.get("plex_server_name", "")).strip()
+        mappings = cfg.get("manual_mappings", {})
+        if any(isinstance(v, int) for v in mappings.values()):
+            cfg["manual_mappings"] = {server_name: mappings}
+            save_config(cfg)
+
+    @staticmethod
+    def _build_mapping_key(session: Any, season_number: int) -> str:
+        grk = getattr(session, "grandparentRatingKey", None)
+        if grk:
+            return f"plex:{grk}:s{season_number}"
+        title = getattr(session, "grandparentTitle", "Unknown")
+        return f"{title.strip().casefold()}:s{season_number}"
+
     def rollback_last(self, anilist_token: str) -> Dict[str, Any]:
         """Annule la dernière action update de l'historique pour l'épisode en cours."""
         with self._lock:
@@ -197,7 +223,8 @@ class Monitor:
         media_id = action.get("media_id")
         from_progress = action.get("from_progress", 0)
 
-        client = AniListClient(token=anilist_token)
+        verbose = bool(load_config().get("verbose_anilist", False))
+        client = AniListClient(token=anilist_token, verbose=verbose, logger=self.log if verbose else None)
         client.rollback_to_progress(media_id=int(media_id), progress=int(from_progress))
 
         rb = {
@@ -251,7 +278,8 @@ class Monitor:
         if not episode:
             raise ValueError("Numéro d'épisode introuvable.")
 
-        client = AniListClient(token=anilist_token)
+        verbose = bool(load_config().get("verbose_anilist", False))
+        client = AniListClient(token=anilist_token, verbose=verbose, logger=self.log if verbose else None)
         list_entry = client.get_media_list_entry(media_id=int(media_id))
         prev_progress = int((list_entry or {}).get("progress") or 0)
         new_progress = max(prev_progress, int(episode))
@@ -312,7 +340,6 @@ class Monitor:
             return
 
         self.log("Connecté à Plex et AniList.")
-        resolve_cache: Dict[str, Tuple[int, str, float]] = {}
 
         while not self._stop_event.is_set():
             cfg = load_config()
@@ -332,7 +359,7 @@ class Monitor:
                         self.current_session = None
                     self._maybe_log_session_help(sessions, cfg.get("plex_username", ""))
                 else:
-                    self._playback_cycle(matched, anilist_client, threshold, resolve_cache, auto_mode)
+                    self._playback_cycle(matched, anilist_client, threshold, auto_mode, cfg)
             except Exception as exc:
                 self.log(f"Erreur pendant le suivi : {exc}")
 
@@ -366,7 +393,8 @@ class Monitor:
         account = MyPlexAccount(token=plex_token)
         plex_server = account.resource(plex_server_name).connect()
 
-        anilist_client = AniListClient(token=anilist_token)
+        verbose = bool(cfg.get("verbose_anilist", False))
+        anilist_client = AniListClient(token=anilist_token, verbose=verbose, logger=self.log if verbose else None)
         anilist_client.verify_token()
         # Récupère le viewer_id pour des requêtes MediaList fiables
         try:
@@ -374,6 +402,8 @@ class Monitor:
             anilist_client.viewer_id = int(profile.get("id") or 0) or None
         except Exception:
             pass
+
+        self._migrate_mapping_keys(cfg)
 
         target_cf = plex_username.strip().casefold()
         target_local = target_cf.split("@", 1)[0] if "@" in target_cf else target_cf
@@ -451,8 +481,8 @@ class Monitor:
         session: Any,
         anilist_client: AniListClient,
         threshold: float,
-        resolve_cache: Dict[str, Tuple[int, str, float]],
         auto_mode: str,
+        cfg: Dict[str, Any],
     ) -> None:
         title = getattr(session, "grandparentTitle", "Unknown")
         ep_num = int(getattr(session, "index", 0) or 0)
@@ -463,6 +493,12 @@ class Monitor:
         pct = (offset / duration * 100.0) if duration > 0 else 0.0
         episode_key = self._episode_key(session)
         session_key = str(getattr(session, "sessionKey", "")) or None
+
+        season_number = int(season) if season is not None and int(season) >= 1 else 1
+        mapping_key = self._build_mapping_key(session, season_number)
+        server_name = str(cfg.get("plex_server_name", "")).strip()
+        manual_mappings: Dict[str, Any] = (cfg.get("manual_mappings") or {}).get(server_name, {})
+        has_manual_mapping = mapping_key in manual_mappings
 
         # Mise à jour UI (session Plex seule, avant résolution AniList)
         with self._lock:
@@ -477,6 +513,8 @@ class Monitor:
                 "offset_ms": offset,
                 "duration_ms": duration,
                 "is_playing": self._is_playing(session),
+                "mapping_key": mapping_key,
+                "has_manual_mapping": has_manual_mapping,
                 "anilist_title": self.current_session.get("anilist_title") if self.current_session else None,
                 "anilist_media_id": self.current_session.get("anilist_media_id") if self.current_session else None,
                 "anilist_progress": self.current_session.get("anilist_progress") if self.current_session else None,
@@ -486,24 +524,27 @@ class Monitor:
                 "threshold_reached": pct >= threshold,
             }
 
-        # Résolution AniList (cachée 5 min)
+        # Résolution AniList
         now = time.monotonic()
-        ck = title.strip().casefold()
         media_id: Optional[int] = None
         matched_title = ""
 
-        if ck in resolve_cache and now - resolve_cache[ck][2] < 300.0:
-            media_id, matched_title, _ = resolve_cache[ck]
+        if has_manual_mapping:
+            # Mapping manuel prioritaire — ignore le resolve_cache
+            media_id = int(manual_mappings[mapping_key])
+            self.log(f"Mapping manuel : {mapping_key} → media_id={media_id}")
+        elif mapping_key in self._resolve_cache and now - self._resolve_cache[mapping_key][2] < 300.0:
+            media_id, matched_title, _ = self._resolve_cache[mapping_key]
         else:
-            best = anilist_client.find_best_anime_id(title)
+            best = anilist_client.find_best_anime_id(title, season_number=season_number)
             if best:
                 media_id, matched_title = best
-                resolve_cache[ck] = (media_id, matched_title, now)
+                self._resolve_cache[mapping_key] = (media_id, matched_title, now)
                 self._map_fail_key = ""
             else:
-                resolve_cache.pop(ck, None)
-                if self._map_fail_key != ck:
-                    self._map_fail_key = ck
+                self._resolve_cache.pop(mapping_key, None)
+                if self._map_fail_key != mapping_key:
+                    self._map_fail_key = mapping_key
                     self.log(f"Anime introuvable sur AniList pour « {title} ».")
                 with self._lock:
                     if self.current_session:
@@ -524,6 +565,10 @@ class Monitor:
                 
             media = card.get("media") or {}
             list_entry = card.get("list_entry")
+            # Résoudre le titre depuis l'API quand on vient d'un mapping manuel
+            if not matched_title:
+                t = media.get("title") or {}
+                matched_title = t.get("english") or t.get("userPreferred") or t.get("romaji") or f"#{media_id}"
             ci = media.get("coverImage") or {}
             cover = ci.get("extraLarge") or ci.get("large") or ci.get("medium") or None
             anilist_progress = int((list_entry or {}).get("progress") or 0)
