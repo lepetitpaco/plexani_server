@@ -1,6 +1,13 @@
 import { useState, useEffect } from "react";
 import type { Status, HistoryAction } from "../App";
 
+/** Candidat AniList retourne par /api/mapping/search. */
+interface AniListCandidate {
+  id: number;
+  title: { romaji?: string; english?: string; native?: string };
+  coverImage?: { medium?: string };
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const STATUS_FR: Record<string, string> = {
@@ -123,7 +130,7 @@ export default function Dashboard({
   // Mapping manuel
   const [mappingOpen, setMappingOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [searchResults, setSearchResults] = useState<AniListCandidate[]>([]);
 
   useEffect(() => {
     if (!searchQuery.trim()) { setSearchResults([]); return; }
@@ -138,13 +145,17 @@ export default function Dashboard({
     return () => clearTimeout(t);
   }, [searchQuery]);
 
-  const handleSetMapping = async (mediaId: number) => {
+  const handleSetMapping = async (mediaId: number, anilistTitle: string) => {
     const s = status?.current_session;
     if (!s?.mapping_key) return;
     await fetch("/api/mapping/set", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mapping_key: s.mapping_key, media_id: mediaId }),
+      body: JSON.stringify({
+        mapping_key: s.mapping_key,
+        media_id: mediaId,
+        anilist_title: anilistTitle,
+      }),
     });
     setMappingOpen(false);
     setSearchQuery("");
@@ -499,10 +510,13 @@ export default function Dashboard({
                     }}
                   />
                   <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 220, overflowY: "auto" }}>
-                    {searchResults.map((r: any) => (
+                    {searchResults.map((r) => (
                       <div
                         key={r.id}
-                        onClick={() => handleSetMapping(r.id)}
+                        onClick={() => handleSetMapping(
+                          r.id,
+                          r.title?.english || r.title?.romaji || `#${r.id}`
+                        )}
                         style={{
                           display: "flex", alignItems: "center", gap: 8,
                           padding: "0.3rem 0.4rem", borderRadius: 5, cursor: "pointer",

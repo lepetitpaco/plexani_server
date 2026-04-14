@@ -1,4 +1,21 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/** Valeur d'un mapping manuel : int (ancien format) ou objet enrichi (nouveau). */
+type MappingValue = number | { media_id: number; title: string };
+
+function getMappingTitle(val: MappingValue): string {
+  if (typeof val === "object") {
+    // val.title peut être vide si le titre n'était pas connu à l'enregistrement.
+    return val.title || `#${val.media_id}`;
+  }
+  return `#${val}`;
+}
+
+function getMappingId(val: MappingValue): number {
+  return typeof val === "object" ? val.media_id : val;
+}
 
 interface ConfigData {
   plex_server_name: string;
@@ -13,7 +30,10 @@ interface ConfigData {
   autostart_monitoring: boolean;
   has_plex_token: boolean;
   has_anilist_token: boolean;
+  manual_mappings: Record<string, Record<string, MappingValue>>;
 }
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 
 /** Champ de formulaire avec aide optionnelle. */
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
@@ -54,11 +74,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 /** Ecran de configuration Plex, AniList et comportement de synchronisation. */
 export default function Config({ onSaved }: { onSaved: () => void }) {
   const [cfg, setCfg] = useState<ConfigData | null>(null);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Plex OAuth state
   const [plexAuthUrl, setPlexAuthUrl] = useState<string | null>(null);
@@ -69,15 +92,15 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
   const [loadingServers, setLoadingServers] = useState(false);
 
   /** Recharge la configuration exposee par le backend. */
-  const loadConfig = async () => {
+  const loadConfig = useCallback(async () => {
     try {
       const r = await fetch("/api/config");
       if (r.ok) setCfg(await r.json());
     } catch {}
-  };
+  }, []);
 
   /** Recupere les serveurs Plex disponibles apres connexion OAuth. */
-  const fetchServers = async () => {
+  const fetchServers = useCallback(async () => {
     setLoadingServers(true);
     try {
       const r = await fetch("/api/plex/servers");
@@ -92,9 +115,9 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
     } finally {
       setLoadingServers(false);
     }
-  };
+  }, []);
 
-  useEffect(() => { loadConfig(); }, []);
+  useEffect(() => { loadConfig(); }, [loadConfig]);
 
   // Poll Plex OAuth quand en attente
   useEffect(() => {
@@ -114,7 +137,7 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
       } catch {}
     }, 2000);
     return () => clearInterval(id);
-  }, [plexPolling]);
+  }, [plexPolling, loadConfig, fetchServers]);
 
   const handleSave = async () => {
     if (!cfg) return;
@@ -180,12 +203,33 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
     }
   };
 
+  const handleCopyRedirectUri = () => {
+    if (!cfg) return;
+    navigator.clipboard.writeText(cfg.anilist_redirect_uri).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const handleRemoveMapping = async (mappingKey: string) => {
+    await fetch("/api/mapping/remove", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mapping_key: mappingKey }),
+    });
+    await loadConfig();
+  };
+
   const set = (key: keyof ConfigData, value: unknown) =>
     setCfg((prev) => prev ? { ...prev, [key]: value } : prev);
 
   if (!cfg) {
     return <div style={{ padding: "2rem", color: "var(--muted)" }}>Chargement…</div>;
   }
+
+  // Mappings du serveur courant
+  const serverMappings = cfg.manual_mappings?.[cfg.plex_server_name] ?? {};
+  const mappingEntries = Object.entries(serverMappings);
 
   return (
     <div style={{ maxWidth: 680, margin: "0 auto", padding: "1.5rem" }}>
@@ -285,6 +329,75 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
 
       {/* ── AniList ── */}
       <Section title="AniList">
+        {/* Guide d'onboarding visible uniquement avant la première connexion */}
+        {!cfg.has_anilist_token && (
+          <div style={{
+            background: "var(--surface2)",
+            border: "1px solid var(--border)",
+            borderRadius: 8,
+            padding: "0.85rem 1rem",
+            marginBottom: "1.1rem",
+            fontSize: 12,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: "0.6rem", color: "var(--fg)" }}>
+              Comment créer ton application AniList :
+            </div>
+            <ol style={{ paddingLeft: "1.25rem", lineHeight: 2, color: "var(--muted)", margin: 0 }}>
+              <li>
+                Ouvre{" "}
+                <a
+                  href="https://anilist.co/settings/developer"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: "var(--blue)" }}
+                >
+                  anilist.co/settings/developer
+                </a>
+                {" "}→ <strong style={{ color: "var(--fg)" }}>Add Client</strong>
+              </li>
+              <li>
+                Dans le champ <em>Redirect URL</em>, colle exactement cette URI :
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+                  <code style={{
+                    background: "var(--surface)",
+                    border: "1px solid var(--border)",
+                    padding: "3px 8px",
+                    borderRadius: 4,
+                    fontSize: 11,
+                    flex: 1,
+                    wordBreak: "break-all",
+                    color: "var(--accent)",
+                  }}>
+                    {cfg.anilist_redirect_uri}
+                  </code>
+                  <button
+                    onClick={handleCopyRedirectUri}
+                    style={{
+                      fontSize: 11, fontWeight: 600,
+                      padding: "3px 9px", borderRadius: 4,
+                      background: copied ? "var(--green-dim)" : "var(--surface)",
+                      color: copied ? "var(--green)" : "var(--fg)",
+                      border: `1px solid ${copied ? "var(--green)" : "var(--border)"}`,
+                      whiteSpace: "nowrap",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {copied ? "✓ Copié" : "Copier"}
+                  </button>
+                </div>
+              </li>
+              <li>
+                Sauvegarde et copie le <strong style={{ color: "var(--fg)" }}>Client ID</strong> et le{" "}
+                <strong style={{ color: "var(--fg)" }}>Client Secret</strong> dans les champs ci-dessous.
+              </li>
+              <li>
+                Clique sur <strong style={{ color: "var(--fg)" }}>Connecter</strong> — une fenêtre s'ouvre
+                pour autoriser Plexani.
+              </li>
+            </ol>
+          </div>
+        )}
+
         <div style={{
           display: "flex", alignItems: "center", justifyContent: "space-between",
           padding: "0.6rem 0.8rem",
@@ -329,13 +442,29 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
         </Field>
         <Field
           label="Redirect URI"
-          hint="À enregistrer dans l'app AniList Developer. Ex : http://localhost:8765/api/oauth/anilist/callback"
+          hint="À enregistrer dans l'app AniList Developer. Doit correspondre exactement."
         >
-          <input
-            style={inputStyle}
-            value={cfg.anilist_redirect_uri}
-            onChange={(e) => set("anilist_redirect_uri", e.target.value)}
-          />
+          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+            <input
+              style={{ ...inputStyle, flex: 1 }}
+              value={cfg.anilist_redirect_uri}
+              onChange={(e) => set("anilist_redirect_uri", e.target.value)}
+            />
+            <button
+              onClick={handleCopyRedirectUri}
+              style={{
+                fontSize: 12, fontWeight: 600,
+                padding: "0.45rem 0.8rem", borderRadius: 6,
+                background: copied ? "var(--green-dim)" : "var(--surface2)",
+                color: copied ? "var(--green)" : "var(--fg)",
+                border: `1px solid ${copied ? "var(--green)" : "var(--border)"}`,
+                whiteSpace: "nowrap",
+                transition: "all 0.15s",
+              }}
+            >
+              {copied ? "✓ Copié" : "Copier"}
+            </button>
+          </div>
         </Field>
       </Section>
 
@@ -393,6 +522,71 @@ export default function Config({ onSaved }: { onSaved: () => void }) {
             Démarrage automatique
           </label>
         </div>
+      </Section>
+
+      {/* ── Mappings manuels ── */}
+      <Section title={`Mappings Plex → AniList${cfg.plex_server_name ? ` (${cfg.plex_server_name})` : ""}`}>
+        {mappingEntries.length === 0 ? (
+          <div style={{ fontSize: 12, color: "var(--muted)", padding: "0.5rem 0" }}>
+            Aucun mapping manuel enregistré. Utilise le bouton{" "}
+            <strong style={{ color: "var(--fg)" }}>Corriger</strong> sur le Dashboard pour en créer un.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.4rem" }}>
+            {mappingEntries.map(([key, val]) => (
+              <div
+                key={key}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.75rem",
+                  padding: "0.45rem 0.65rem",
+                  borderRadius: 6,
+                  background: "var(--surface2)",
+                  border: "1px solid var(--border)",
+                }}
+              >
+                <span style={{
+                  fontFamily: "monospace",
+                  fontSize: 11,
+                  color: "var(--muted)",
+                  flex: 1,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
+                  {key}
+                </span>
+                <span style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: "var(--fg)",
+                  flexShrink: 0,
+                  maxWidth: 180,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}>
+                  {getMappingTitle(val)}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--muted)", flexShrink: 0 }}>
+                  #{getMappingId(val)}
+                </span>
+                <button
+                  onClick={() => handleRemoveMapping(key)}
+                  style={{
+                    fontSize: 11, fontWeight: 600,
+                    padding: "2px 7px", borderRadius: 4, flexShrink: 0,
+                    background: "var(--red-dim)", color: "var(--red)",
+                    border: "1px solid var(--red)",
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </Section>
 
       {/* ── Save ── */}

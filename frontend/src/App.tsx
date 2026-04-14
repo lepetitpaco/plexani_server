@@ -59,6 +59,13 @@ export interface HistoryAction {
   reverted_at?: string;
 }
 
+/** Toast ephemere affiche en bas a droite. */
+interface Toast {
+  id: number;
+  text: string;
+  ok: boolean;
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 type Tab = "dashboard" | "config" | "logs";
@@ -71,17 +78,33 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [history, setHistory] = useState<HistoryAction[]>([]);
   const [viewer, setViewer] = useState<ViewerProfile | null>(null);
+  const [toasts, setToasts] = useState<Toast[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastIdRef = useRef(0);
 
-  const fetchHistory = useCallback(async () => {
+  // ── Toast helpers ──────────────────────────────────────────────────────────
+
+  const pushToast = useCallback((text: string, ok = true) => {
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, text, ok }]);
+    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+  }, []);
+
+  // ── Data fetchers ──────────────────────────────────────────────────────────
+
+  /** Recharge l'historique et retourne les actions pour usage immediat. */
+  const fetchHistory = useCallback(async (): Promise<HistoryAction[]> => {
     try {
       const r = await fetch("/api/history");
       if (r.ok) {
         const d = await r.json();
-        setHistory((d.actions ?? []).slice().reverse());
+        const actions: HistoryAction[] = (d.actions ?? []).slice().reverse();
+        setHistory(actions);
+        return actions;
       }
     } catch {}
+    return [];
   }, []);
 
   const fetchViewer = useCallback(async () => {
@@ -94,8 +117,10 @@ export default function App() {
     } catch {}
   }, []);
 
+  // ── WebSocket ──────────────────────────────────────────────────────────────
+
   const connect = useCallback(() => {
-    // Le WebSocket pousse le statut; les messages ponctuels declenchent des rechargements cibles.
+    // Le WebSocket pousse le statut et les nouveaux logs en temps réel.
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
     wsRef.current = ws;
@@ -106,8 +131,24 @@ export default function App() {
       try {
         const msg = JSON.parse(e.data);
         if (msg.type === "status") setStatus(msg.data);
-        if (msg.type === "logs") setLogs(msg.data);
-        if (msg.type === "history_updated") fetchHistory();
+        if (msg.type === "logs") {
+          // Snapshot initial à la connexion : remplace la liste et initialise le compteur.
+          setLogs(msg.data);
+        }
+        if (msg.type === "log_entry") {
+          // Nouvelles entrées poussées unitairement par le hook on_new_log du monitor.
+          setLogs((prev) => [...prev, msg.data].slice(-300));
+        }
+        if (msg.type === "history_updated") {
+          fetchHistory().then((actions) => {
+            const last = actions[0];
+            if (last?.type === "update") {
+              pushToast(
+                `✓ Sync : ${last.anilist_title ?? last.plex_title ?? "?"} → ép. ${last.to_progress}`
+              );
+            }
+          });
+        }
         if (msg.type === "config_updated") fetchViewer();
       } catch {}
     };
@@ -119,7 +160,7 @@ export default function App() {
     };
 
     ws.onerror = () => ws.close();
-  }, [fetchHistory]);
+  }, [fetchHistory, fetchViewer, pushToast]);
 
   useEffect(() => {
     connect();
@@ -131,7 +172,7 @@ export default function App() {
     };
   }, [connect, fetchHistory, fetchViewer]);
 
-  // Polling fallback status
+  // Polling fallback status quand le WS est déconnecté
   useEffect(() => {
     if (wsConnected) return;
     const id = setInterval(async () => {
@@ -140,29 +181,6 @@ export default function App() {
         if (r.ok) setStatus(await r.json());
       } catch {}
     }, 5000);
-    return () => clearInterval(id);
-  }, [wsConnected]);
-
-  // Nouveaux logs via polling
-  const logCountRef = useRef(0);
-  useEffect(() => {
-    const id = setInterval(async () => {
-      if (!wsConnected) return;
-      const since = logCountRef.current;
-      try {
-        const r = await fetch(`/api/logs?since=${since}`);
-        if (!r.ok) return;
-        const data = await r.json();
-        const newLogs: LogEntry[] = data.logs ?? [];
-        if (newLogs.length > 0) {
-          setLogs((prev) => {
-            const combined = [...prev, ...newLogs].slice(-300);
-            logCountRef.current = since + newLogs.length;
-            return combined;
-          });
-        }
-      } catch {}
-    }, 3000);
     return () => clearInterval(id);
   }, [wsConnected]);
 
@@ -283,6 +301,39 @@ export default function App() {
         {tab === "config" && <Config onSaved={() => setTab("dashboard")} />}
         {tab === "logs" && <Logs logs={logs} onClear={() => setLogs([])} />}
       </main>
+
+      {/* ── Toasts ── */}
+      <div style={{
+        position: "fixed",
+        bottom: "1.5rem",
+        right: "1.5rem",
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.5rem",
+        zIndex: 1000,
+        pointerEvents: "none",
+      }}>
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            style={{
+              padding: "0.6rem 1rem",
+              borderRadius: 8,
+              fontSize: 13,
+              fontWeight: 600,
+              background: t.ok ? "var(--green-dim)" : "var(--red-dim)",
+              color: t.ok ? "var(--green)" : "var(--red)",
+              border: `1px solid ${t.ok ? "var(--green)" : "var(--red)"}`,
+              boxShadow: "0 4px 16px rgba(0,0,0,0.4)",
+              animation: "fadeInUp 0.2s ease",
+              maxWidth: 340,
+              backdropFilter: "blur(4px)",
+            }}
+          >
+            {t.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

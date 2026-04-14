@@ -16,10 +16,12 @@ export default function Logs({ logs, onClear }: { logs: LogEntry[]; onClear: () 
   const [verbose, setVerbose] = useState(false);
 
   useEffect(() => {
+    let active = true;
     fetch("/api/config")
       .then((r) => r.json())
-      .then((d) => setVerbose(Boolean(d.verbose_anilist)))
+      .then((d) => { if (active) setVerbose(Boolean(d.verbose_anilist)); })
       .catch(() => {});
+    return () => { active = false; };
   }, []);
 
   useEffect(() => {

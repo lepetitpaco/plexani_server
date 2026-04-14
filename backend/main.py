@@ -62,7 +62,18 @@ async def _status_push_loop() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialise les taches de fond et le suivi automatique au demarrage."""
+    """Initialise les taches de fond, le hook de logs et le suivi automatique."""
+    loop = asyncio.get_event_loop()
+
+    # Branche le hook on_new_log du monitor sur le broadcast WS.
+    # run_coroutine_threadsafe traverse la frontière thread monitor → event loop.
+    def _on_new_log(entry: dict) -> None:
+        asyncio.run_coroutine_threadsafe(
+            _broadcast({"type": "log_entry", "data": entry}), loop
+        )
+
+    monitor.on_new_log = _on_new_log
+
     asyncio.create_task(_status_push_loop())
 
     cfg = load_config()
@@ -91,7 +102,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     try:
         # Envoie le status initial dès la connexion
         await ws.send_json({"type": "status", "data": monitor.get_status()})
-        # Envoie les derniers logs
+        # Envoie les derniers logs (init snapshot — les suivants arrivent via log_entry)
         await ws.send_json({"type": "logs", "data": monitor.get_logs()})
         while True:
             # Reste connecté (côté client ping)
@@ -137,7 +148,10 @@ async def force_sync() -> Dict[str, Any]:
     if not token:
         raise HTTPException(400, "Token AniList manquant.")
     try:
-        result = monitor.force_sync_episode(anilist_token=token)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, lambda: monitor.force_sync_episode(anilist_token=token)
+        )
         await _broadcast({"type": "history_updated"})
         await _broadcast({"type": "status", "data": monitor.get_status()})
         return {"ok": True, **result}
@@ -207,7 +221,10 @@ async def rollback_last() -> Dict[str, Any]:
     if not token:
         raise HTTPException(400, "Token AniList manquant.")
     try:
-        rb = monitor.rollback_last(anilist_token=token)
+        loop = asyncio.get_event_loop()
+        rb = await loop.run_in_executor(
+            None, lambda: monitor.rollback_last(anilist_token=token)
+        )
         await _broadcast({"type": "history_updated"})
         return {"ok": True, "rollback": rb}
     except ValueError as exc:
@@ -239,9 +256,15 @@ async def plex_oauth_init() -> Dict[str, Any]:
     """Demarre le flux OAuth PIN de Plex et renvoie l'URL d'autorisation."""
     global _plex_pin_login
     try:
-        from plexapi.myplex import MyPlexPinLogin
-        _plex_pin_login = MyPlexPinLogin(oauth=True)
-        _plex_pin_login.run(timeout=300)
+        loop = asyncio.get_event_loop()
+
+        def _init_plex_pin() -> Any:
+            from plexapi.myplex import MyPlexPinLogin
+            pin_login = MyPlexPinLogin(oauth=True)
+            pin_login.run(timeout=300)
+            return pin_login
+
+        _plex_pin_login = await loop.run_in_executor(None, _init_plex_pin)
         return {"ok": True, "auth_url": _plex_pin_login.oauthUrl()}
     except Exception as exc:
         raise HTTPException(500, f"Impossible d'initier l'OAuth Plex : {exc}")
@@ -257,9 +280,15 @@ async def plex_oauth_poll() -> Dict[str, Any]:
         token = _plex_pin_login.token
         if not token:
             return {"done": False}
-        from plexapi.myplex import MyPlexAccount
-        account = MyPlexAccount(token=token)
-        username = (account.username or account.title or "").strip()
+
+        loop = asyncio.get_event_loop()
+
+        def _fetch_account(tok: str) -> str:
+            from plexapi.myplex import MyPlexAccount
+            account = MyPlexAccount(token=tok)
+            return (account.username or account.title or "").strip()
+
+        username = await loop.run_in_executor(None, lambda: _fetch_account(token))
         cfg = load_config()
         cfg["plex_token"] = token
         cfg["plex_username"] = username or cfg.get("plex_username", "")
@@ -308,19 +337,19 @@ async def anilist_oauth_callback(code: Optional[str] = None, error: Optional[str
         )
 
     try:
-        import requests as req
-        resp = req.post(
-            "https://anilist.co/api/v2/oauth/token",
-            json={
-                "grant_type": "authorization_code",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "redirect_uri": redirect_uri,
-                "code": code,
-            },
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            timeout=20,
-        )
+        # httpx est déjà importé et async — pas de blocage de l'event loop.
+        async with httpx.AsyncClient(timeout=20) as http:
+            resp = await http.post(
+                "https://anilist.co/api/v2/oauth/token",
+                json={
+                    "grant_type": "authorization_code",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uri": redirect_uri,
+                    "code": code,
+                },
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+            )
         data = resp.json()
         token = data.get("access_token")
         if not token:
@@ -349,13 +378,20 @@ async def mapping_set(body: Dict[str, Any]) -> Dict[str, Any]:
     """Enregistre un mapping manuel Plex vers AniList pour le serveur courant."""
     mapping_key = str(body.get("mapping_key", "")).strip()
     media_id = body.get("media_id")
+    anilist_title = str(body.get("anilist_title", "")).strip()
     if not mapping_key or media_id is None:
         raise HTTPException(400, "mapping_key et media_id sont requis.")
     cfg = load_config()
     server_name = str(cfg.get("plex_server_name", "")).strip()
     all_mappings = dict(cfg.get("manual_mappings") or {})
     server_mappings = dict(all_mappings.get(server_name, {}))
-    server_mappings[mapping_key] = int(media_id)
+    # Stocke le titre AniList avec le media_id pour un affichage enrichi.
+    # On ne stocke pas de fallback "#id" : une chaîne vide laisse _playback_cycle
+    # résoudre le titre depuis l'API AniList au premier cycle.
+    server_mappings[mapping_key] = {
+        "media_id": int(media_id),
+        "title": anilist_title.strip() if anilist_title else "",
+    }
     all_mappings[server_name] = server_mappings
     cfg["manual_mappings"] = all_mappings
     save_config(cfg)
@@ -393,7 +429,10 @@ async def mapping_search(q: str = "") -> Dict[str, Any]:
     try:
         from anilist_client import AniListClient
         client = AniListClient(token=token)
-        candidates = client.search_anime_candidates(title=q, per_page=10)
+        loop = asyncio.get_event_loop()
+        candidates = await loop.run_in_executor(
+            None, lambda: client.search_anime_candidates(title=q, per_page=10)
+        )
         results = [
             {
                 "id": c.get("id"),
@@ -443,7 +482,8 @@ async def get_anilist_viewer() -> Dict[str, Any]:
         from anilist_client import AniListClient
         verbose = bool(cfg.get("verbose_anilist", False))
         client = AniListClient(token=token, verbose=verbose)
-        profile = client.get_viewer_profile()
+        loop = asyncio.get_event_loop()
+        profile = await loop.run_in_executor(None, client.get_viewer_profile)
         return {"ok": True, **profile}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -459,9 +499,13 @@ async def get_plex_servers() -> Dict[str, Any]:
     if not token:
         return {"ok": False, "servers": [], "error": "Token Plex manquant — connecte-toi d'abord."}
     try:
-        from plexapi.myplex import MyPlexAccount
-        account = MyPlexAccount(token=token)
-        names = sorted({r.name for r in account.resources() if getattr(r, "name", None)})
+        def _fetch_servers(tok: str) -> List[str]:
+            from plexapi.myplex import MyPlexAccount
+            account = MyPlexAccount(token=tok)
+            return sorted({r.name for r in account.resources() if getattr(r, "name", None)})
+
+        loop = asyncio.get_event_loop()
+        names = await loop.run_in_executor(None, lambda: _fetch_servers(token))
         return {"ok": True, "servers": names}
     except Exception as exc:
         return {"ok": False, "servers": [], "error": str(exc)}

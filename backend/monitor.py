@@ -20,6 +20,10 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 HISTORY_PATH = DATA_DIR / "history.json"
 CONFIG_PATH = DATA_DIR / "config.json"
 
+# Verrou module-level protégeant les accès concurrents à config.json depuis le
+# thread monitor ET le thread uvicorn (event loop FastAPI).
+_config_lock = threading.Lock()
+
 CONFIG_DEFAULTS: Dict[str, Any] = {
     # Token OAuth Plex stocke cote serveur.
     "plex_token": "",
@@ -48,6 +52,7 @@ CONFIG_DEFAULTS: Dict[str, Any] = {
     # Active les logs GraphQL AniList detaillees.
     "verbose_anilist": False,
     # Mappings Plex -> AniList ranges par serveur Plex.
+    # Chaque valeur peut etre un int (ancien format) ou {media_id, title} (nouveau).
     "manual_mappings": {},
 }
 
@@ -58,20 +63,24 @@ SYNC_END_ONLY_MIN_PERCENT = 97.0
 
 def load_config() -> Dict[str, Any]:
     """Charge la configuration persistante en appliquant les valeurs par defaut."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    merged = dict(CONFIG_DEFAULTS)
-    if CONFIG_PATH.exists():
-        try:
-            merged.update(json.loads(CONFIG_PATH.read_text("utf-8")))
-        except Exception:
-            pass
-    return merged
+    with _config_lock:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        merged = dict(CONFIG_DEFAULTS)
+        if CONFIG_PATH.exists():
+            try:
+                merged.update(json.loads(CONFIG_PATH.read_text("utf-8")))
+            except Exception:
+                pass
+        return merged
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
-    """Persiste la configuration serveur au format JSON."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+    """Persiste la configuration serveur au format JSON (ecriture atomique via .tmp)."""
+    with _config_lock:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
+        tmp.replace(CONFIG_PATH)
 
 
 def effective_threshold(cfg: Dict[str, Any]) -> float:
@@ -134,6 +143,11 @@ class Monitor:
         self._map_fail_key: str = ""
         self._plex_diag_last: float = 0.0
         self._resolve_cache: Dict[str, Tuple[int, str, float]] = {}
+        # Cache court (45s) pour les fiches AniList : {media_id: (card, timestamp)}
+        self._card_cache: Dict[int, Tuple[Any, float]] = {}
+        # Hook optionnel injecté par main.py pour broadcaster les nouveaux logs
+        # vers les WebSockets sans créer de dépendance circulaire entre modules.
+        self.on_new_log: Optional[Any] = None
 
     # ── Logging ───────────────────────────────────────────────────────────────
 
@@ -145,6 +159,12 @@ class Monitor:
             if len(self.logs) > 300:
                 self.logs = self.logs[-300:]
         print(f"[plexani] {msg}")
+        # Notifie le hook temps réel (branché sur le broadcast WS dans main.py).
+        if callable(self.on_new_log):
+            try:
+                self.on_new_log(entry)
+            except Exception:
+                pass
 
     def get_logs(self, since_index: int = 0) -> List[Dict[str, str]]:
         """Retourne les logs a partir d'un index connu du client."""
@@ -207,9 +227,30 @@ class Monitor:
         self._resolve_cache.pop(key, None)
 
     def _migrate_mapping_keys(self, cfg: Dict[str, Any]) -> None:
-        """Migre l'ancienne structure à plat vers la structure imbriquée par serveur."""
+        """Migre/répare la structure manual_mappings vers {server_name: {key: value}}.
+
+        Cas 1 — ancienne structure plate {key: int} : migration vers la structure imbriquée.
+        Cas 2 — sur-imbrication {server: {server: {key: value}}} : réparation (artefact
+                 du bug de migration qui doublait l'imbrication à chaque redémarrage).
+        """
         server_name = str(cfg.get("plex_server_name", "")).strip()
+        if not server_name:
+            return
         mappings = cfg.get("manual_mappings", {})
+
+        # ── Cas 2 : sur-imbrication ───────────────────────────────────────────
+        # Détectée si manual_mappings[server_name][server_name] existe aussi.
+        # On remonte la chaîne jusqu'au niveau réel (clés qui ne sont pas server_name).
+        server_val = mappings.get(server_name)
+        if isinstance(server_val, dict) and server_name in server_val:
+            inner = server_val
+            while isinstance(inner.get(server_name), dict):
+                inner = inner[server_name]
+            cfg["manual_mappings"] = {server_name: inner}
+            save_config(cfg)
+            return
+
+        # ── Cas 1 : ancienne structure plate {key: int} ───────────────────────
         if any(isinstance(v, int) for v in mappings.values()):
             cfg["manual_mappings"] = {server_name: mappings}
             save_config(cfg)
@@ -231,11 +272,11 @@ class Monitor:
 
         if not session:
             raise ValueError("Lance une lecture sur Plex sur l'anime concerné pour annuler la sync de cet épisode.")
-            
+
         cur_media_id = session.get("anilist_media_id")
         cur_episode = session.get("episode")
         cur_session_key = session.get("session_key")
-        
+
         if not cur_media_id or not cur_episode or not cur_session_key:
             raise ValueError("Impossible d'annuler : lecture non identifiée ou terminée.")
 
@@ -243,7 +284,11 @@ class Monitor:
         for action in reversed(actions):
             if action.get("type") == "update":
                 # Verifie qu'on est EXACTEMENT sur la même lecture physique sans interruption
-                if int(action.get("media_id", 0)) == int(cur_media_id) and int(action.get("episode", -1)) == int(cur_episode) and action.get("session_key") == cur_session_key:
+                if (
+                    int(action.get("media_id", 0)) == int(cur_media_id)
+                    and int(action.get("episode", -1)) == int(cur_episode)
+                    and action.get("session_key") == cur_session_key
+                ):
                     target_action = action
                     break
 
@@ -571,8 +616,19 @@ class Monitor:
         matched_title = ""
 
         if has_manual_mapping:
-            # Mapping manuel prioritaire — ignore le resolve_cache
-            media_id = int(manual_mappings[mapping_key])
+            # Supporte le nouveau format {media_id, title} et l'ancien format int.
+            raw_val = manual_mappings[mapping_key]
+            if isinstance(raw_val, dict):
+                media_id = int(raw_val["media_id"])
+                stored_title = str(raw_val.get("title") or "")
+                # Ignore les titres de fallback "#<id>" (ex: "#12345") stockés quand
+                # anilist_title était absent : l'API fournira le vrai titre.
+                matched_title = (
+                    "" if (stored_title.startswith("#") and stored_title[1:].isdigit())
+                    else stored_title
+                )
+            else:
+                media_id = int(raw_val)
             self.log(f"Mapping manuel : {mapping_key} → media_id={media_id}")
         elif mapping_key in self._resolve_cache and now - self._resolve_cache[mapping_key][2] < 300.0:
             media_id, matched_title, _ = self._resolve_cache[mapping_key]
@@ -594,20 +650,17 @@ class Monitor:
                         self.current_session["anilist_media_id"] = None
                 return
 
-        # Récupère la fiche AniList complète (cover, progrès) (Cachée 45s pour la limite d'API)
+        # Récupère la fiche AniList complète (cover, progrès) — cachée 45s
         try:
-            if not hasattr(self, "_card_cache"):
-                self._card_cache = {}
-                
             if media_id in self._card_cache and now - self._card_cache[media_id][1] < 45.0:
                 card = self._card_cache[media_id][0]
             else:
                 card = anilist_client.get_media_with_list_entry(media_id)
                 self._card_cache[media_id] = (card, now)
-                
+
             media = card.get("media") or {}
             list_entry = card.get("list_entry")
-            # Résoudre le titre depuis l'API quand on vient d'un mapping manuel
+            # Résoudre le titre depuis l'API quand on vient d'un mapping manuel sans titre
             if not matched_title:
                 t = media.get("title") or {}
                 matched_title = t.get("english") or t.get("userPreferred") or t.get("romaji") or f"#{media_id}"

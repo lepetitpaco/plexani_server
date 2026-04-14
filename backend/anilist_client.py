@@ -7,12 +7,18 @@ sous forme d'AniListClientError.
 """
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 
 ANILIST_GRAPHQL_URL = "https://graphql.anilist.co"
+
+# Limite officielle AniList : 90 requêtes par minute.
+# On se laisse une marge de 5 pour absorber les éventuels décalages d'horloge.
+_RATE_LIMIT = 85
+_RATE_WINDOW = 60.0
 
 
 class AniListClientError(Exception):
@@ -55,6 +61,8 @@ class AniListClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        # Timestamps des appels récents pour le token bucket (fenêtre glissante 60s).
+        self._req_times: List[float] = []
 
     def _vlog(self, label: str, data: Any = None) -> None:
         """Emet un log verbose AniList si le mode verbose est actif."""
@@ -100,6 +108,17 @@ class AniListClient:
 
     def _request(self, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         """Execute une requete GraphQL AniList et retourne le champ data."""
+        # ── Token bucket : garde-fou contre le rate-limit AniList (90 req/min) ──
+        now = time.monotonic()
+        self._req_times = [t for t in self._req_times if now - t < _RATE_WINDOW]
+        if len(self._req_times) >= _RATE_LIMIT:
+            wait = _RATE_WINDOW - (now - self._req_times[0])
+            if wait > 0:
+                self._vlog(f"Rate-limit préventif : attente {wait:.1f}s")
+                time.sleep(wait)
+            self._req_times = []
+        self._req_times.append(time.monotonic())
+
         self._vlog("─" * 60)
         self._vlog("GraphQL query:", query.strip())
         self._vlog("Variables", variables)
@@ -112,6 +131,12 @@ class AniListClient:
             )
         except requests.RequestException as exc:
             raise AniListClientError(f"Network error while calling AniList: {exc}") from exc
+
+        if response.status_code == 429:
+            retry_after = int(response.headers.get("Retry-After", 60))
+            raise AniListClientError(
+                f"Rate limit AniList atteint — réessaie dans {retry_after}s"
+            )
 
         if response.status_code != 200:
             raise AniListClientError(
